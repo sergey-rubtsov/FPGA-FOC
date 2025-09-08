@@ -210,6 +210,13 @@ The simulation related files are all in the [SIM](./SIM) folder, including the f
 
 Before using iverilog simulation, you need to install iverilog , see: [iverilog_usage](https://github.com/WangXuan95/WangXuan95/blob/main/iverilog_usage/iverilog_usage.md)
 
+## <span id="en30">simulate MT6835 in GTKWave and iverilog</span>
+
+cd SIM
+iverilog -o tb_mt6835.vvp tb_mt6835_spi_reader.v ../RTL/mt6835_spi_reader.v
+vvp tb_mt6835.vv
+gtkwave mt6835.vc
+
 ## <span id="en31">simulate clark_tr and park_tr</span>
 
 Let's run a simulation of the clark transform and park transform first.
