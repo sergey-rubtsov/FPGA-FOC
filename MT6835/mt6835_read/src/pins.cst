@@ -1,0 +1,22 @@
+# =============================
+# System clock and reset
+# =============================
+#IO_LOC "i_rst" H11;
+#IO_PORT "i_rst" PULL_MODE=DOWN DRIVE=OFF BANK_VCCIO=3.3;
+IO_LOC "i_clk" E2;
+IO_PORT "i_clk" PULL_MODE=NONE DRIVE=OFF BANK_VCCIO=3.3;
+
+# =============================
+# SPI pins to MT6835
+# =============================
+IO_LOC "spi_cs"   G2;
+IO_PORT "spi_cs"   IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8 BANK_VCCIO=3.3;
+
+IO_LOC "spi_clk"  J4;
+IO_PORT "spi_clk"  IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+
+IO_LOC "spi_mosi" L2;
+IO_PORT "spi_mosi" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+
+IO_LOC "spi_miso" K1;
+IO_PORT "spi_miso" IO_TYPE=LVCMOS33 PULL_MODE=NONE BANK_VCCIO=3.3;
