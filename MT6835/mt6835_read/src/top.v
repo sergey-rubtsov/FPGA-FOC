@@ -9,14 +9,17 @@ module top #(
     output reg         spi_mosi,
     input  wire        spi_miso,
     // -------------------- Логика пользователя ------------------------------------------
-    //input  wire        i_start,      // запуск burst чтения (один импульс)
     output reg         o_valid,      // готовность результата (импульс 1 такт)
     output reg [20:0]  o_angle,      // угол (21 бит)
     output reg [2:0]   o_status,     // статус
     output reg [7:0]   o_crc         // CRC от чипа
 );
 
-    // FSM
+    // ==============================
+    // Внутренние регистры
+    // ==============================
+    reg [$clog2(CLK_DIV)-1:0] clk_cnt = 0;
+
     localparam ST_IDLE  = 0,
                ST_CMD   = 1,
                ST_READ  = 2,
@@ -24,64 +27,62 @@ module top #(
                ST_WAIT  = 4;
 
     reg [2:0] state;
-    reg [7:0] clk_cnt;
-    reg       sck_pre;
     reg [5:0] bit_cnt;
+    reg [15:0] tx_shift;
+    reg [15:0] rx_shift;
+    reg [1:0]  reg_index;  // 0..3 для регистров 0x003..0x006
 
-    reg [7:0]  tx_cmd;     // команда
-    reg [31:0] rx_shift;   // сдвиг для данных
-    reg [31:0] rx_latch;   // зафиксированные данные
-
-    // SPI clock divider
+    // ==============================
+    // Генерация SPI тактов
+    // ==============================
     always @(posedge i_clk or negedge i_rst) begin
         if(!i_rst) begin
             clk_cnt <= 0;
-            sck_pre <= 1'b0;
+            spi_sck <= 1'b0;
         end else begin
-            if(clk_cnt == CLK_DIV-1) begin
+            if (clk_cnt == CLK_DIV-1) begin
                 clk_cnt <= 0;
-                sck_pre <= ~sck_pre;
+                spi_sck <= ~spi_sck;
             end else begin
                 clk_cnt <= clk_cnt + 1;
             end
         end
     end
 
+    // ==============================
+    // FSM
+    // ==============================
     always @(posedge i_clk or negedge i_rst) begin
         if(!i_rst) begin
             state    <= ST_IDLE;
             spi_cs   <= 1'b1;
-            spi_sck  <= 1'b0;
             spi_mosi <= 1'b1;
             bit_cnt  <= 0;
+            reg_index<= 0;
             rx_shift <= 0;
-            rx_latch <= 0;
             o_angle  <= 0;
             o_status <= 0;
             o_crc    <= 0;
             o_valid  <= 0;
         end else begin
-            spi_sck <= sck_pre;
-            o_valid <= 1'b0;
+            o_valid <= 1'b0; // по умолчанию сбрасываем
+            case (state)
 
-            case(state)
                 ST_IDLE: begin
-                    spi_cs <= 1'b1;
-                    spi_mosi <= 1'b1;
-                    bit_cnt <= 0;
-                    //if(i_start) begin
-                        tx_cmd <= 8'h83;   // команда READ ANGLE
-                        state  <= ST_CMD;
-                        spi_cs <= 1'b0;
-                    //end
+                    spi_cs   <= 1'b1;
+                    bit_cnt  <= 0;
+                    reg_index<= 0;
+                    spi_cs   <= 1'b0;  // старт транзакции
+                    tx_shift <= {4'b1010, 12'h003}; // первый запрос (0x003)
+                    state    <= ST_CMD;
                 end
 
                 ST_CMD: begin
-                    if(sck_pre == 1'b0 && clk_cnt == 0) begin
-                        spi_mosi <= tx_cmd[7];
-                        tx_cmd   <= {tx_cmd[6:0],1'b0};
+                    if (spi_sck == 1'b0 && clk_cnt == 0) begin
+                        spi_mosi <= tx_shift[15];
+                        tx_shift <= {tx_shift[14:0], 1'b0};
                         bit_cnt  <= bit_cnt + 1;
-                        if(bit_cnt == 7) begin
+                        if (bit_cnt == 15) begin
                             bit_cnt <= 0;
                             state   <= ST_READ;
                         end
@@ -89,34 +90,51 @@ module top #(
                 end
 
                 ST_READ: begin
-                    if(sck_pre == 1'b1 && clk_cnt == 0) begin
-                        rx_shift <= {rx_shift[30:0], spi_miso};
+                    if (spi_sck == 1'b1 && clk_cnt == 0) begin
+                        rx_shift <= {rx_shift[14:0], spi_miso};
                         bit_cnt  <= bit_cnt + 1;
-                        if(bit_cnt == 31) begin
-                            rx_latch <= {rx_shift[30:0], spi_miso};
-                            state    <= ST_DONE;
+                        if (bit_cnt == 15) begin
+                            // один байт принят
+                            case (reg_index)
+                                0: o_angle[20:13] <= rx_shift[7:0];   // старшие биты
+                                1: o_angle[12:5]  <= rx_shift[7:0];
+                                2: o_angle[4:0]   <= rx_shift[7:3];
+                                3: begin
+                                       o_status <= rx_shift[2:0];
+                                       o_crc    <= rx_shift[7:0]; // при желании сюда CRC
+                                   end
+                            endcase
+
+                            reg_index <= reg_index + 1;
+                            bit_cnt   <= 0;
+
+                            if (reg_index == 3) begin
+                                state <= ST_DONE; // все регистры вычитаны
+                            end else begin
+                                tx_shift <= {4'b1010, (12'h003 + reg_index + 1)};
+                                state    <= ST_CMD;
+                            end
                         end
                     end
                 end
 
                 ST_DONE: begin
-                    spi_cs   <= 1'b1;
-                    o_angle  <= rx_latch[31:11];
-                    o_status <= rx_latch[10:8];
-                    o_crc    <= rx_latch[7:0];
-                    o_valid  <= 1'b1;
-                    state    <= ST_WAIT;   // вернуться в ожидание
+                    spi_cs  <= 1'b1;   // подняли CS — транзакция завершена
+                    o_valid <= 1'b1;   // данные готовы
+                    bit_cnt <= 0;
+                    state   <= ST_WAIT;
                 end
 
                 ST_WAIT: begin
-                    if(sck_pre == 1'b1 && clk_cnt == 0) begin
-                        //spi_cs   <= 1'b1;
-                        bit_cnt  <= bit_cnt + 1;
-                        if(bit_cnt == 32) begin
-                            state    <= ST_IDLE;   // вернуться в ожидание
+                    // маленькая пауза, чтобы CS подержать high
+                    if (spi_sck == 1'b1 && clk_cnt == 0) begin
+                        bit_cnt <= bit_cnt + 1;
+                        if (bit_cnt == 2) begin
+                            state   <= ST_IDLE;
                         end
                     end
                 end
+
             endcase
         end
     end
