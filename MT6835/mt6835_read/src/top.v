@@ -1,140 +1,172 @@
-module top #(
-    parameter CLK_DIV = 8    // делитель частоты SPI (подбирай под свою тактовую частоту)
-)(
-    input  wire        i_rst,
-    input  wire        i_clk,
-    // -------------------- SPI интерфейс ------------------------------------------------
-    output reg         spi_cs,
-    output reg         spi_sck,
-    output reg         spi_mosi,
+// top_burst_mt6835.v
+module top_burst_mt6835 (
+    input  wire        i_clk,    // системный такт
+    input  wire        i_rst_n,  // активный низкий reset (как у тебя раньше)
+    // SPI физика
     input  wire        spi_miso,
-    // -------------------- Логика пользователя ------------------------------------------
-    output reg         o_valid,      // готовность результата (импульс 1 такт)
-    output reg [20:0]  o_angle,      // угол (21 бит)
-    output reg [2:0]   o_status,     // статус
-    output reg [7:0]   o_crc         // CRC от чипа
+    output wire        spi_clk,
+    output wire        spi_mosi,
+    output wire        spi_cs,
+    // результат
+    output reg [20:0]  angle     // 21-битный угол
 );
 
-    // ==============================
-    // Внутренние регистры
-    // ==============================
-    reg [$clog2(CLK_DIV)-1:0] clk_cnt = 0;
+    // ---------------------
+    // Параметры команды / длины
+    // ---------------------
+    localparam CMD_BYTE0 = 8'hA0; // MSB команды {4'b1010, addr[11:8]}  (пример для addr=0x003)
+    localparam CMD_BYTE1 = 8'h03; // LSB команды (addr[7:0])
+    localparam CMD_BYTES = 2;     // 2 байта команды (16 бит = 4b cmd + 12b addr)
+    localparam DATA_BYTES = 4;    // ожидаем 4 байта от R3..R6 (32 бит, из них 21 - angle)
+    localparam TOTAL_BYTES = CMD_BYTES + DATA_BYTES; // всего байтов в транзакции
 
-    localparam ST_IDLE  = 0,
-               ST_CMD   = 1,
-               ST_READ  = 2,
-               ST_DONE  = 3,
-               ST_WAIT  = 4;
+    // ---------------------
+    // Сигналы к SPI_Master
+    // ---------------------
+    reg  [7:0]  tx_byte;
+    reg         tx_dv;
+    wire        tx_ready;
+    wire        rx_dv;
+    wire [7:0]  rx_byte;
+
+    // ---------------------
+    // CS регистр и публичный вывод
+    // ---------------------
+    reg cs_reg;
+    assign spi_cs = cs_reg;
+
+    // ---------------------
+    // Инстанс SPI Master (тот, что у тебя)
+    // ---------------------
+    SPI_Master #(
+        .SPI_MODE(3),
+        .CLKS_PER_HALF_BIT(8) // подогнать под частоту, у тебя примерно 26 MHz -> выбирай подвид
+    ) spi_i (
+        .i_Rst_L(i_rst_n),
+        .i_Clk(i_clk),
+        .i_TX_Byte(tx_byte),
+        .i_TX_DV(tx_dv),
+        .o_TX_Ready(tx_ready),
+        .o_RX_DV(rx_dv),
+        .o_RX_Byte(rx_byte),
+        .o_SPI_Clk(spi_clk),
+        .i_SPI_MISO(spi_miso),
+        .o_SPI_MOSI(spi_mosi)
+    );
+
+    // ---------------------
+    // FSM для burst read
+    // ---------------------
+    localparam S_IDLE       = 0;
+    localparam S_ASSERT_CS  = 1;
+    localparam S_SEND_BYTE  = 2;
+    localparam S_WAIT_RX    = 3;
+    localparam S_DONE_CSUP  = 4;
+    localparam S_GAP        = 5;
 
     reg [2:0] state;
-    reg [5:0] bit_cnt;
-    reg [15:0] tx_shift;
-    reg [15:0] rx_shift;
-    reg [1:0]  reg_index;  // 0..3 для регистров 0x003..0x006
+    reg [3:0] byte_idx;                  // индекс текущего байта 0..TOTAL_BYTES-1
+    reg [7:0] data_bytes [0:DATA_BYTES-1]; // примем данные сюда
+    reg [7:0] saved_cmd0, saved_cmd1;
+    reg [15:0] gap_cnt;
+    localparam GAP_CYCLES = 50000; // пауза между burst (подогнать по необходимости)
 
-    // ==============================
-    // Генерация SPI тактов
-    // ==============================
-    always @(posedge i_clk or negedge i_rst) begin
-        if(!i_rst) begin
-            clk_cnt <= 0;
-            spi_sck <= 1'b0;
+    // Инициализация регистров при reset
+    integer i;
+    always @(posedge i_clk or negedge i_rst_n) begin
+        if (!i_rst_n) begin
+            state     <= S_IDLE;
+            cs_reg    <= 1'b1;
+            tx_byte   <= 8'h00;
+            tx_dv     <= 1'b0;
+            byte_idx  <= 0;
+            angle     <= 21'd0;
+            gap_cnt   <= 0;
+            saved_cmd0 <= CMD_BYTE0;
+            saved_cmd1 <= CMD_BYTE1;
+            for (i=0; i<DATA_BYTES; i=i+1) data_bytes[i] <= 8'h00;
         end else begin
-            if (clk_cnt == CLK_DIV-1) begin
-                clk_cnt <= 0;
-                spi_sck <= ~spi_sck;
-            end else begin
-                clk_cnt <= clk_cnt + 1;
-            end
-        end
-    end
+            // default: tx_dv only one cycle pulses
+            tx_dv <= 1'b0;
 
-    // ==============================
-    // FSM
-    // ==============================
-    always @(posedge i_clk or negedge i_rst) begin
-        if(!i_rst) begin
-            state    <= ST_IDLE;
-            spi_cs   <= 1'b1;
-            spi_mosi <= 1'b1;
-            bit_cnt  <= 0;
-            reg_index<= 0;
-            rx_shift <= 0;
-            o_angle  <= 0;
-            o_status <= 0;
-            o_crc    <= 0;
-            o_valid  <= 0;
-        end else begin
-            o_valid <= 1'b0; // по умолчанию сбрасываем
             case (state)
-
-                ST_IDLE: begin
-                    spi_cs   <= 1'b1;
-                    bit_cnt  <= 0;
-                    reg_index<= 0;
-                    spi_cs   <= 1'b0;  // старт транзакции
-                    tx_shift <= {4'b1010, 12'h003}; // первый запрос (0x003)
-                    state    <= ST_CMD;
+                S_IDLE: begin
+                    cs_reg <= 1'b1;
+                    if (gap_cnt == 0) begin
+                        // начинаем новую burst-транзакцию
+                        state    <= S_ASSERT_CS;
+                        // сохранённые байты команды
+                        saved_cmd0 <= CMD_BYTE0;
+                        saved_cmd1 <= CMD_BYTE1;
+                    end else begin
+                        gap_cnt <= gap_cnt - 1;
+                    end
                 end
 
-                ST_CMD: begin
-                    if (spi_sck == 1'b0 && clk_cnt == 0) begin
-                        spi_mosi <= tx_shift[15];
-                        tx_shift <= {tx_shift[14:0], 1'b0};
-                        bit_cnt  <= bit_cnt + 1;
-                        if (bit_cnt == 15) begin
-                            bit_cnt <= 0;
-                            state   <= ST_READ;
+                S_ASSERT_CS: begin
+                    // опускаем CS и ждём один такт, чтобы устройство успело latch данные
+                    cs_reg   <= 1'b0;
+                    byte_idx <= 0;
+                    // гарантируем, что прошлые данные стёрты
+                    for (i=0; i<DATA_BYTES; i=i+1) data_bytes[i] <= 8'h00;
+                    state <= S_SEND_BYTE;
+                end
+
+                S_SEND_BYTE: begin
+                    // Отправляем следующий байт, но только если мастер готов (o_TX_Ready==1)
+                    if (tx_ready) begin
+                        // решаем, что отправлять: командный байт или dummy (0x00) для чтения
+                        if (byte_idx == 0) begin
+                            tx_byte <= saved_cmd0; // MSB команды
+                        end else if (byte_idx == 1) begin
+                            tx_byte <= saved_cmd1; // LSB команды
+                        end else begin
+                            tx_byte <= 8'h00;      // dummy, чтобы вытянуть данные
+                        end
+                        tx_dv   <= 1'b1; // однотактный импульс для SPI_Master
+                        state   <= S_WAIT_RX;
+                    end
+                end
+
+                S_WAIT_RX: begin
+                    // Ждём, когда SPI_Master выдаст o_RX_DV — это означает, что этот байт принят и rx_byte валиден
+                    if (rx_dv) begin
+                        // если пришёл байт данных (после командных байтов) — сохраняем
+                        if (byte_idx >= CMD_BYTES) begin
+                            data_bytes[byte_idx - CMD_BYTES] <= rx_byte;
+                        end
+                        // увеличиваем индекс байта
+                        if (byte_idx == (TOTAL_BYTES - 1)) begin
+                            // получили последний байт — переходим в DONE
+                            state <= S_DONE_CSUP;
+                        end else begin
+                            byte_idx <= byte_idx + 1;
+                            state <= S_SEND_BYTE; // отправляем следующий байт
                         end
                     end
                 end
 
-                ST_READ: begin
-                    if (spi_sck == 1'b1 && clk_cnt == 0) begin
-                        rx_shift <= {rx_shift[14:0], spi_miso};
-                        bit_cnt  <= bit_cnt + 1;
-                        if (bit_cnt == 15) begin
-                            // один байт принят
-                            case (reg_index)
-                                0: o_angle[20:13] <= rx_shift[7:0];   // старшие биты
-                                1: o_angle[12:5]  <= rx_shift[7:0];
-                                2: o_angle[4:0]   <= rx_shift[7:3];
-                                3: begin
-                                       o_status <= rx_shift[2:0];
-                                       o_crc    <= rx_shift[7:0]; // при желании сюда CRC
-                                   end
-                            endcase
+                S_DONE_CSUP: begin
+                    // Поднимаем CS — транзакция закончена
+                    cs_reg <= 1'b1;
+                    // Собираем 32-битное слово из 4 принятых байтов: data_bytes[0]..[3]
+                    // Предполагаем, что data_bytes[0] — старший байт (MSB)
+                    // angle = {data_bytes[0],data_bytes[1],data_bytes[2],data_bytes[3]}[31:11]
+                    angle <= { data_bytes[0], data_bytes[1], data_bytes[2], data_bytes[3] } >> 11;
+                    // задаём паузу перед следующей транзакцией
+                    gap_cnt <= GAP_CYCLES;
+                    state <= S_GAP;
+                end
 
-                            reg_index <= reg_index + 1;
-                            bit_cnt   <= 0;
-
-                            if (reg_index == 3) begin
-                                state <= ST_DONE; // все регистры вычитаны
-                            end else begin
-                                tx_shift <= {4'b1010, (12'h003 + reg_index + 1)};
-                                state    <= ST_CMD;
-                            end
-                        end
+                S_GAP: begin
+                    if (gap_cnt == 0) begin
+                        state <= S_IDLE;
+                    end else begin
+                        gap_cnt <= gap_cnt - 1;
                     end
                 end
 
-                ST_DONE: begin
-                    spi_cs  <= 1'b1;   // подняли CS — транзакция завершена
-                    o_valid <= 1'b1;   // данные готовы
-                    bit_cnt <= 0;
-                    state   <= ST_WAIT;
-                end
-
-                ST_WAIT: begin
-                    // маленькая пауза, чтобы CS подержать high
-                    if (spi_sck == 1'b1 && clk_cnt == 0) begin
-                        bit_cnt <= bit_cnt + 1;
-                        if (bit_cnt == 2) begin
-                            state   <= ST_IDLE;
-                        end
-                    end
-                end
-
+                default: state <= S_IDLE;
             endcase
         end
     end
