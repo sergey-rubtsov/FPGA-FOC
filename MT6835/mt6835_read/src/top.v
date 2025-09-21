@@ -1,15 +1,16 @@
 // top_burst_mt6835.v
-module top_burst_mt6835 (
-    input  wire        i_clk,    // системный такт
-    input  wire        i_rst_n,  // активный низкий reset (как у тебя раньше)
-    // SPI физика
-    input  wire        spi_miso,
-    output wire        spi_clk,
-    output wire        spi_mosi,
+module mt6835_burst_read (
+    input  wire        i_clk, // системный такт
+    input  wire        rstn,  // активный низкий reset
+    // SPI интерфейс
+    output wire        spi_sck,
     output wire        spi_cs,
+    output wire        spi_mosi,
+    input  wire        spi_miso,
+
     // результат
-    output reg [20:0]  angle,     // 21-битный угол
-    output reg [15:0]  o_angle_deg   // угол в градусах (0..359)
+    output reg [20:0]  phi_21,  // 21-битный угол
+    output reg [11:0]  phi      // 12-битный угол
 );
 
     // ---------------------
@@ -37,20 +38,20 @@ module top_burst_mt6835 (
     assign spi_cs = cs_reg;
 
     // ---------------------
-    // Инстанс SPI Master (тот, что у тебя)
+    // SPI Master
     // ---------------------
     SPI_Master #(
         .SPI_MODE(3),
         .CLKS_PER_HALF_BIT(8) // подогнать под частоту, у тебя примерно 26 MHz -> выбирай подвид
     ) spi_i (
-        .i_Rst_L(i_rst_n),
+        .i_Rst_L(rstn),
         .i_Clk(i_clk),
         .i_TX_Byte(tx_byte),
         .i_TX_DV(tx_dv),
         .o_TX_Ready(tx_ready),
         .o_RX_DV(rx_dv),
         .o_RX_Byte(rx_byte),
-        .o_SPI_Clk(spi_clk),
+        .o_SPI_Clk(spi_sck),
         .i_SPI_MISO(spi_miso),
         .o_SPI_MOSI(spi_mosi)
     );
@@ -74,14 +75,14 @@ module top_burst_mt6835 (
 
     // Инициализация регистров при reset
     integer i;
-    always @(posedge i_clk or negedge i_rst_n) begin
-        if (!i_rst_n) begin
+    always @(posedge i_clk or negedge rstn) begin
+        if (!rstn) begin
             state     <= S_IDLE;
             cs_reg    <= 1'b1;
             tx_byte   <= 8'h00;
             tx_dv     <= 1'b0;
             byte_idx  <= 0;
-            angle     <= 21'd0;
+            phi_21     <= 21'd0;
             gap_cnt   <= 0;
             saved_cmd0 <= CMD_BYTE0;
             saved_cmd1 <= CMD_BYTE1;
@@ -153,9 +154,9 @@ module top_burst_mt6835 (
                     // Собираем 32-битное слово из 4 принятых байтов: data_bytes[0]..[3]
                     // Предполагаем, что data_bytes[0] — старший байт (MSB)
                     // angle = {data_bytes[0],data_bytes[1],data_bytes[2],data_bytes[3]}[31:11]
-                    angle <= { data_bytes[0], data_bytes[1], data_bytes[2], data_bytes[3] } >> 11;
-                    // перевод в градусы: angle * 360 / 2^21
-                    o_angle_deg <= ( (angle * 32'd360) >> 21 );
+                    phi_21 <= { data_bytes[0], data_bytes[1], data_bytes[2], data_bytes[3] } >> 11;
+                    // перевод в 12 битный угол (диапазон 0 - 4095)
+                    phi <= phi_21[20:9];
                     // задаём паузу перед следующей транзакцией
                     gap_cnt <= GAP_CYCLES;
                     state <= S_GAP;
