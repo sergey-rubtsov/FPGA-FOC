@@ -3,7 +3,7 @@ module mt6835_burst_read (
     input  wire        i_clk, // системный такт
     input  wire        rstn,  // активный низкий reset
     // SPI интерфейс
-    output wire        spi_sck,
+    output wire        spi_clk,
     output wire        spi_cs,
     output wire        spi_mosi,
     input  wire        spi_miso,
@@ -51,7 +51,7 @@ module mt6835_burst_read (
         .o_TX_Ready(tx_ready),
         .o_RX_DV(rx_dv),
         .o_RX_Byte(rx_byte),
-        .o_SPI_Clk(spi_sck),
+        .o_SPI_Clk(spi_clk),
         .i_SPI_MISO(spi_miso),
         .o_SPI_MOSI(spi_mosi)
     );
