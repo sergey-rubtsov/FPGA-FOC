@@ -1,0 +1,24 @@
+<?xml version="1" encoding="UTF-8"?>
+<!DOCTYPE gowin-fpga-project>
+<Project>
+    <Template>FPGA</Template>
+    <Version>5</Version>
+    <Device name="GW5A-25A" pn="GW5A-LV25MG121NC1/I0">gw5a25a-002</Device>
+    <FileList>
+        <File path="src/SPI_Master.v" type="file.verilog" enable="1"/>
+        <File path="src/adc_ad7928.v" type="file.verilog" enable="1"/>
+        <File path="src/cartesian2polar.v" type="file.verilog" enable="1"/>
+        <File path="src/clark_tr.v" type="file.verilog" enable="1"/>
+        <File path="src/foc_top.v" type="file.verilog" enable="1"/>
+        <File path="src/fpga_top.v" type="file.verilog" enable="1"/>
+        <File path="src/hold_detect.v" type="file.verilog" enable="1"/>
+        <File path="src/i2c_register_read.v" type="file.verilog" enable="1"/>
+        <File path="src/mt6835_burst_read.v" type="file.verilog" enable="1"/>
+        <File path="src/park_tr.v" type="file.verilog" enable="1"/>
+        <File path="src/pi_controller.v" type="file.verilog" enable="1"/>
+        <File path="src/sincos.v" type="file.verilog" enable="1"/>
+        <File path="src/svpwm.v" type="file.verilog" enable="1"/>
+        <File path="src/uart_monitor.v" type="file.verilog" enable="1"/>
+        <File path="src/timing.sdc" type="file.sdc" enable="1"/>
+    </FileList>
+</Project>
